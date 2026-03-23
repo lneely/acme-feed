@@ -120,6 +120,9 @@ func renderMarkdown(sb *strings.Builder, n *html.Node, depth int) {
 		var inner strings.Builder
 		renderChildren(&inner, n, depth)
 		text := strings.TrimSpace(inner.String())
+		if text == "" {
+			return // icon-only link — skip (social share buttons, etc.)
+		}
 		if href == "" || href == text {
 			sb.WriteString(text)
 		} else {
