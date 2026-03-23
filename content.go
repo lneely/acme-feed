@@ -85,7 +85,21 @@ func renderMarkdown(sb *strings.Builder, n *html.Node, depth int) {
 
 	switch n.DataAtom {
 	case atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
-		level := int(n.DataAtom-atom.H1)/2 + 1 // h1→1, h2→2, …
+		var level int
+		switch n.DataAtom {
+		case atom.H1:
+			level = 1
+		case atom.H2:
+			level = 2
+		case atom.H3:
+			level = 3
+		case atom.H4:
+			level = 4
+		case atom.H5:
+			level = 5
+		default:
+			level = 6
+		}
 		sb.WriteString("\n" + strings.Repeat("#", level) + " ")
 		renderChildren(sb, n, depth)
 		sb.WriteString("\n\n")
