@@ -346,7 +346,7 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 	}
 	e := ef.entry
 	w.Name("/+Feeds/%s/%s", slug, ef.filename)
-	w.Write("tag", []byte("Read Unread Pin "))
+	w.Write("tag", []byte("Read Unread Pin Unpin "))
 
 	store.mu.RLock()
 	sub := store.subscriptionBySlug(slug)
@@ -385,6 +385,8 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 					store.unmarkRead(entrySlug, ef.entry.GUID)
 				case "Pin":
 					store.pin(entrySlug, ef.entry.GUID)
+				case "Unpin":
+					store.unpin(entrySlug, ef.entry.GUID)
 				default:
 					w.WriteEvent(ev)
 				}
