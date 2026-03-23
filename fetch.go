@@ -155,7 +155,7 @@ func parseFeed(data []byte) (*FetchResult, error) {
 		case "feed":
 			return parseAtom(clean)
 		case "RDF":
-			return parseRSS(clean) // RSS 1.0 / RDF
+			return parseRDF1(clean)
 		default:
 			return nil, fmt.Errorf("unrecognized feed root element: %s", se.Name.Local)
 		}
@@ -180,6 +180,66 @@ func parseRSS(data []byte) (*FetchResult, error) {
 			ts = fetchedAt
 		}
 		guid := strings.TrimSpace(item.GUID)
+		if guid == "" {
+			guid = synthGUID(item.Link, item.Title)
+		}
+		summary := strings.TrimSpace(item.Description)
+		if len(summary) > 4096 {
+			summary = truncateUTF8(summary, 4096)
+		}
+		result.Entries = append(result.Entries, &Entry{
+			GUID:      guid,
+			Timestamp: ts,
+			Title:     strings.TrimSpace(item.Title),
+			URL:       strings.TrimSpace(item.Link),
+			Summary:   summary,
+			FetchedAt: fetchedAt,
+		})
+	}
+	return result, nil
+}
+
+// RSS 1.0 / RDF Site Summary structures.
+// After namespace stripping, the root is <RDF>, <channel> holds the feed
+// title, and <item> elements are direct children of <RDF> (not of <channel>).
+// dc:date is stripped to <date>; dc:description may appear too but we use
+// <description> which is in the core RSS 1.0 namespace.
+type rdf1Feed struct {
+	XMLName xml.Name    `xml:"RDF"`
+	Channel rdf1Channel `xml:"channel"`
+	Items   []rdf1Item  `xml:"item"`
+}
+
+type rdf1Channel struct {
+	Title string `xml:"title"`
+}
+
+type rdf1Item struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	Date        string `xml:"date"`    // dc:date → <date>
+	Identifier  string `xml:"identifier"` // dc:identifier → <identifier>
+}
+
+func parseRDF1(data []byte) (*FetchResult, error) {
+	var feed rdf1Feed
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.Strict = false
+	dec.Entity = xml.HTMLEntity
+	if err := dec.Decode(&feed); err != nil {
+		return nil, fmt.Errorf("RSS 1.0 decode: %w", err)
+	}
+
+	fetchedAt := time.Now().UTC().Format(time.RFC3339)
+	result := &FetchResult{FeedTitle: strings.TrimSpace(feed.Channel.Title)}
+
+	for _, item := range feed.Items {
+		ts := parseRSSDate(item.Date)
+		if ts == "" {
+			ts = fetchedAt
+		}
+		guid := strings.TrimSpace(item.Identifier)
 		if guid == "" {
 			guid = synthGUID(item.Link, item.Title)
 		}
