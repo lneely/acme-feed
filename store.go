@@ -76,6 +76,7 @@ func newFeedStore() (*FeedStore, error) {
 		filepath.Join(dataDir, "feeds"),
 		filepath.Join(dataDir, "read"),
 		filepath.Join(dataDir, "pinned"),
+		filepath.Join(dataDir, "content"),
 	} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return nil, err
@@ -195,6 +196,31 @@ func (s *FeedStore) loadEntries(slug string) ([]*Entry, error) {
 
 func (s *FeedStore) loadReadSet(slug string) (map[string]bool, error) {
 	return s.loadGUIDFile(filepath.Join(s.dataDir, "read", slug))
+}
+
+// ---------------------------------------------------------------------------
+// Content cache
+// ---------------------------------------------------------------------------
+
+// contentCachePath returns the path for a cached Markdown content file.
+func (s *FeedStore) contentCachePath(slug, entryFilename string) string {
+	dir := filepath.Join(s.dataDir, "content", slug)
+	os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, entryFilename+".md")
+}
+
+// loadCachedContent returns cached Markdown, or ("", false) if not present.
+func (s *FeedStore) loadCachedContent(slug, entryFilename string) (string, bool) {
+	data, err := os.ReadFile(s.contentCachePath(slug, entryFilename))
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+// saveCachedContent writes Markdown to the content cache.
+func (s *FeedStore) saveCachedContent(slug, entryFilename, md string) {
+	os.WriteFile(s.contentCachePath(slug, entryFilename), []byte(md), 0644)
 }
 
 // loadGUIDFile reads a newline-separated file of GUIDs into a set.

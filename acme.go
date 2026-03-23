@@ -395,7 +395,7 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 				// of plumbing to the browser.
 				text := strings.TrimSpace(string(ev.Text))
 				if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
-					go openContentWindow(text, entrySlug, entryFilename)
+					go openContentWindow(store, text, entrySlug, entryFilename)
 					continue // consumed — do not plumb
 				}
 				w.WriteEvent(ev)
@@ -410,22 +410,15 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 // Content window
 // ---------------------------------------------------------------------------
 
-func openContentWindow(url, slug, entryFilename string) {
+func openContentWindow(store *FeedStore, url, slug, entryFilename string) {
 	w, err := acme.New()
 	if err != nil {
 		return
 	}
 	w.Name("/+Feeds/%s/%s/content", slug, entryFilename)
 	w.Write("tag", []byte("Get "))
-	w.Write("body", []byte("fetching…\n"))
-	w.Ctl("clean")
 
-	md, err := fetchMarkdown(url)
-	if err != nil {
-		w.Addr(",")
-		w.Write("data", []byte(fmt.Sprintf("error: %v\n", err)))
-		w.Ctl("clean")
-	} else {
+	writeContent := func(md string) {
 		w.Addr(",")
 		w.Write("data", []byte(md))
 		w.Ctl("clean")
@@ -434,22 +427,40 @@ func openContentWindow(url, slug, entryFilename string) {
 		w.Ctl("show")
 	}
 
+	// Serve from cache if available; otherwise fetch and cache.
+	if md, ok := store.loadCachedContent(slug, entryFilename); ok {
+		writeContent(md)
+	} else {
+		w.Write("body", []byte("fetching…\n"))
+		w.Ctl("clean")
+		md, err := fetchMarkdown(url)
+		if err != nil {
+			w.Addr(",")
+			w.Write("data", []byte(fmt.Sprintf("error: %v\n", err)))
+			w.Ctl("clean")
+		} else {
+			store.saveCachedContent(slug, entryFilename, md)
+			writeContent(md)
+		}
+	}
+
 	go func() {
 		defer w.CloseFiles()
 		for ev := range w.EventChan() {
 			switch {
 			case (ev.C2 == 'x' || ev.C2 == 'X') && strings.TrimSpace(string(ev.Text)) == "Get":
-				md2, err2 := fetchMarkdown(url)
 				w.Addr(",")
-				if err2 != nil {
-					w.Write("data", []byte(fmt.Sprintf("error: %v\n", err2)))
-				} else {
-					w.Write("data", []byte(md2))
-					w.Addr("0")
-					w.Ctl("dot=addr")
-					w.Ctl("show")
-				}
+				w.Write("data", []byte("fetching…\n"))
 				w.Ctl("clean")
+				md, err := fetchMarkdown(url)
+				if err != nil {
+					w.Addr(",")
+					w.Write("data", []byte(fmt.Sprintf("error: %v\n", err)))
+					w.Ctl("clean")
+				} else {
+					store.saveCachedContent(slug, entryFilename, md)
+					writeContent(md)
+				}
 			default:
 				w.WriteEvent(ev)
 			}
