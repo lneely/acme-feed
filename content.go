@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -13,15 +15,33 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
 // fetchMarkdown fetches a URL and returns its main content as Markdown.
-func fetchMarkdown(url string) (string, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+// On failure it tries the Wayback Machine as a fallback.
+func fetchMarkdown(rawURL string) (string, error) {
+	md, err := fetchMarkdownDirect(rawURL)
+	if err == nil {
+		return md, nil
+	}
+	// Fallback: Wayback Machine.
+	md, waybackErr := fetchMarkdownWayback(rawURL)
+	if waybackErr == nil {
+		return md + "\n\n---\n*Retrieved from the Wayback Machine.*\n", nil
+	}
+	return "", fmt.Errorf("%v (wayback: %v)", err, waybackErr)
+}
+
+// fetchMarkdownDirect performs a plain HTTP GET and converts HTML to Markdown.
+func fetchMarkdownDirect(rawURL string) (string, error) {
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "Feeds/1.0 (acme feed reader)")
-	resp, err := client.Do(req)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -29,17 +49,58 @@ func fetchMarkdown(url string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	return parseHTMLToMarkdown(resp.Body)
+}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20)) // 4 MiB
+// fetchMarkdownWayback looks up the most recent Wayback Machine snapshot
+// for rawURL and fetches its content as Markdown.
+func fetchMarkdownWayback(rawURL string) (string, error) {
+	apiURL := "https://archive.org/wayback/available?url=" + url.QueryEscape(rawURL)
+	resp, err := httpClient.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("wayback API: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		ArchivedSnapshots struct {
+			Closest struct {
+				Available bool   `json:"available"`
+				URL       string `json:"url"`
+				Status    string `json:"status"`
+			} `json:"closest"`
+		} `json:"archived_snapshots"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("wayback parse: %w", err)
+	}
+	snap := result.ArchivedSnapshots.Closest
+	if !snap.Available || snap.URL == "" {
+		return "", fmt.Errorf("no snapshot available")
+	}
+	if snap.Status != "200" {
+		return "", fmt.Errorf("snapshot status %s", snap.Status)
+	}
+	wresp, err := httpClient.Get(snap.URL)
+	if err != nil {
+		return "", fmt.Errorf("wayback fetch: %w", err)
+	}
+	defer wresp.Body.Close()
+	if wresp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("wayback HTTP %d", wresp.StatusCode)
+	}
+	return parseHTMLToMarkdown(wresp.Body)
+}
+
+// parseHTMLToMarkdown reads HTML from r and returns Markdown.
+func parseHTMLToMarkdown(r io.Reader) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(r, 4<<20)) // 4 MiB
 	if err != nil {
 		return "", err
 	}
-
 	doc, err := html.Parse(bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("HTML parse: %w", err)
 	}
-
 	// Prefer <article> or <main>; fall back to <body>.
 	root := findNode(doc, atom.Article)
 	if root == nil {
@@ -51,7 +112,6 @@ func fetchMarkdown(url string) (string, error) {
 	if root == nil {
 		root = doc
 	}
-
 	var sb strings.Builder
 	renderMarkdown(&sb, root, 0)
 	return cleanupMarkdown(sb.String()), nil
