@@ -607,6 +607,17 @@ func (s *FeedStore) rebuildFiles(slug string) {
 	s.files[slug] = files
 }
 
+// feedFiles returns a snapshot of all entryFiles for a slug, sorted by
+// timestamp descending (newest first). Index 0 is newest; last is oldest.
+func (s *FeedStore) feedFiles(slug string) []entryFile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src := s.files[slug]
+	snap := make([]entryFile, len(src))
+	copy(snap, src)
+	return snap
+}
+
 // globalPinned returns all pinned entryFiles across all feeds, sorted by
 // timestamp descending.
 func (s *FeedStore) globalPinned() []IndexRow {

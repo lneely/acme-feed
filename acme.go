@@ -346,7 +346,7 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 	}
 	e := ef.entry
 	w.Name("/+Feeds/%s/%s", slug, ef.filename)
-	w.Write("tag", []byte("Read Unread Pin Unpin "))
+	w.Write("tag", []byte("Read Unread Pin Unpin Prev Next "))
 
 	store.mu.RLock()
 	sub := store.subscriptionBySlug(slug)
@@ -387,6 +387,31 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 					store.pin(entrySlug, ef.entry.GUID)
 				case "Unpin":
 					store.unpin(entrySlug, ef.entry.GUID)
+				case "Prev", "Next":
+					files := store.feedFiles(entrySlug)
+					idx := -1
+					for i, f := range files {
+						if f.filename == entryFilename {
+							idx = i
+							break
+						}
+					}
+					var target *entryFile
+					if ev.C2 == 'x' || ev.C2 == 'X' {
+						cmd := strings.TrimSpace(string(ev.Text))
+						if cmd == "Prev" && idx >= 0 && idx+1 < len(files) {
+							// Prev = older = higher index (list is newest-first)
+							ef2 := files[idx+1]
+							target = &ef2
+						} else if cmd == "Next" && idx > 0 {
+							// Next = newer = lower index
+							ef2 := files[idx-1]
+							target = &ef2
+						}
+					}
+					if target != nil {
+						go openEntryWindow(store, entrySlug, *target)
+					}
 				default:
 					w.WriteEvent(ev)
 				}
