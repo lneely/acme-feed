@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"9fans.net/go/acme"
 )
@@ -12,6 +13,9 @@ import (
 // ---------------------------------------------------------------------------
 
 var mainDone = make(chan struct{})
+var mainWin *acme.Win
+var mainSnapshot []mainRow // guarded by mainSnapshotMu
+var mainSnapshotMu sync.RWMutex
 
 // openMainWindow opens the /+Feeds window and starts its event loop.
 func openMainWindow(store *FeedStore) error {
@@ -19,6 +23,7 @@ func openMainWindow(store *FeedStore) error {
 	if err != nil {
 		return err
 	}
+	mainWin = w
 	w.Name("/+Feeds")
 	w.Write("tag", []byte("Get Put Pins Refresh Unsub Sub "))
 	refreshMainWindow(w, store)
@@ -126,6 +131,32 @@ func handleMainWindow(w *acme.Win, store *FeedStore) {
 	}
 }
 
+// annotateReadInMainWindow finds the entry by slug+guid in the current
+// mainSnapshot and annotates its line with "[read]" in place.
+func annotateReadInMainWindow(slug, guid string) {
+	if mainWin == nil {
+		return
+	}
+	mainSnapshotMu.RLock()
+	snap := mainSnapshot
+	mainSnapshotMu.RUnlock()
+	for i, row := range snap {
+		if row.slug == slug && row.ef.entry.GUID == guid {
+			idx := i + 1
+			line := fmt.Sprintf("%4d  %-20s  %-20s  %s [read]\n",
+				idx,
+				formatTS(row.ef.entry.Timestamp),
+				row.slug,
+				row.ef.entry.Title,
+			)
+			mainWin.Addr("%d", idx)
+			mainWin.Write("data", []byte(line))
+			mainWin.Ctl("clean")
+			return
+		}
+	}
+}
+
 func refreshMainWindow(w *acme.Win, store *FeedStore) {
 	rows := store.globalIndex(true) // unread only
 
@@ -163,6 +194,9 @@ func buildSnapshot(store *FeedStore) []mainRow {
 	for i, r := range rows {
 		snap[i] = mainRow{slug: r.slug, ef: r.ef}
 	}
+	mainSnapshotMu.Lock()
+	mainSnapshot = snap
+	mainSnapshotMu.Unlock()
 	return snap
 }
 
@@ -339,14 +373,10 @@ func refreshUnsubWindow(w *acme.Win, store *FeedStore) {
 // Entry window
 // ---------------------------------------------------------------------------
 
-func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
-	w, err := acme.New()
-	if err != nil {
-		return
-	}
+// populateEntryWindow writes entry content into an existing window.
+func populateEntryWindow(w *acme.Win, store *FeedStore, slug string, ef entryFile) {
 	e := ef.entry
 	w.Name("/+Feeds/%s/%s", slug, ef.filename)
-	w.Write("tag", []byte("Read Unread Pin Unpin Prev Next "))
 
 	store.mu.RLock()
 	sub := store.subscriptionBySlug(slug)
@@ -364,14 +394,24 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 		fmt.Fprintf(&sb, "\n%s\n", e.Summary)
 	}
 
-	w.Write("body", []byte(sb.String()))
+	w.Addr(",")
+	w.Write("data", []byte(sb.String()))
 	w.Ctl("clean")
 	w.Addr("0")
 	w.Ctl("dot=addr")
 	w.Ctl("show")
+}
 
-	entrySlug := slug
-	entryFilename := ef.filename
+func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
+	w, err := acme.New()
+	if err != nil {
+		return
+	}
+	w.Write("tag", []byte("Read Unread Pin Unpin Prev Next "))
+	populateEntryWindow(w, store, slug, ef)
+
+	curSlug := slug
+	curEF := ef
 
 	go func() {
 		defer w.CloseFiles()
@@ -380,37 +420,36 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 			case 'x', 'X':
 				switch strings.TrimSpace(string(ev.Text)) {
 				case "Read":
-					store.markRead(entrySlug, ef.entry.GUID)
+					store.markRead(curSlug, curEF.entry.GUID)
 				case "Unread":
-					store.unmarkRead(entrySlug, ef.entry.GUID)
+					store.unmarkRead(curSlug, curEF.entry.GUID)
 				case "Pin":
-					store.pin(entrySlug, ef.entry.GUID)
+					store.pin(curSlug, curEF.entry.GUID)
 				case "Unpin":
-					store.unpin(entrySlug, ef.entry.GUID)
+					store.unpin(curSlug, curEF.entry.GUID)
 				case "Prev", "Next":
-					files := store.feedFiles(entrySlug)
+					files := store.feedFiles(curSlug)
 					idx := -1
 					for i, f := range files {
-						if f.filename == entryFilename {
+						if f.filename == curEF.filename {
 							idx = i
 							break
 						}
 					}
+					cmd := strings.TrimSpace(string(ev.Text))
 					var target *entryFile
-					if ev.C2 == 'x' || ev.C2 == 'X' {
-						cmd := strings.TrimSpace(string(ev.Text))
-						if cmd == "Prev" && idx >= 0 && idx+1 < len(files) {
-							// Prev = older = higher index (list is newest-first)
-							ef2 := files[idx+1]
-							target = &ef2
-						} else if cmd == "Next" && idx > 0 {
-							// Next = newer = lower index
-							ef2 := files[idx-1]
-							target = &ef2
-						}
+					if cmd == "Prev" && idx >= 0 && idx+1 < len(files) {
+						ef2 := files[idx+1]
+						target = &ef2
+					} else if cmd == "Next" && idx > 0 {
+						ef2 := files[idx-1]
+						target = &ef2
 					}
 					if target != nil {
-						go openEntryWindow(store, entrySlug, *target)
+						curEF = *target
+						store.markRead(curSlug, curEF.entry.GUID)
+						annotateReadInMainWindow(curSlug, curEF.entry.GUID)
+						populateEntryWindow(w, store, curSlug, curEF)
 					}
 				default:
 					w.WriteEvent(ev)
@@ -420,7 +459,7 @@ func openEntryWindow(store *FeedStore, slug string, ef entryFile) {
 				// of plumbing to the browser.
 				text := strings.TrimSpace(string(ev.Text))
 				if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
-					go openContentWindow(store, text, entrySlug, entryFilename)
+					go openContentWindow(store, text, curSlug, curEF.filename)
 					continue // consumed — do not plumb
 				}
 				w.WriteEvent(ev)
